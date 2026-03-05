@@ -137,10 +137,10 @@ def generate_chart_with_data(
 
     total_rows = len(result_df)
     columns = list(result_df.columns)
-    backend = chart_backend or default_backend
+    backend = chart_backend if chart_backend and chart_backend != "auto" else default_backend
     # Accept both formats: {"spec": {...}} (legacy) or {"chart_type": "bar"} (direct)
     spec = (chart_spec.get("spec") if "spec" in chart_spec else chart_spec) if chart_spec else None
-    format_type = chart_format or (
+    format_type = chart_format if chart_format and chart_format != "auto" else (
         "json" if return_json else ("static" if backend == "plotext" else "json")
     )
     show_chart = get_chart and total_rows >= 2

@@ -17,6 +17,7 @@ from langchain.agents.middleware import (
 from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from boring_semantic_layer.agents.tools import BSLTools
 
@@ -41,15 +42,18 @@ class LangGraphBackend(BSLTools):
         profile: str | None = None,
         profile_file: Path | str | None = None,
         chart_backend: str = "plotext",
+        return_json: bool = False,
+        model_kwargs: dict | None = None,
     ):
         super().__init__(
             model_path=model_path,
             profile=profile,
             profile_file=profile_file,
             chart_backend=chart_backend,
+            return_json=return_json,
         )
         self.llm_model = llm_model
-        self.llm = init_chat_model(llm_model, temperature=0)
+        self.llm = init_chat_model(llm_model, **(model_kwargs or {"temperature": 0}))
         self.conversation_history: list = []
 
         # Build middleware list
@@ -206,19 +210,20 @@ class LangGraphBackend(BSLTools):
                         on_tool_result(tool_call_id, status, error_msg, content)
 
         # Update conversation history
-        self._update_history(user_input, final_response)
+        self._update_history(user_input, final_response, final_kwargs)
         self._error_callback = None
 
         tool_output = "\n\n".join(all_tool_outputs) if all_tool_outputs else ""
         return tool_output, final_response
 
-    def _update_history(self, user_input: str, response: str):
+    def _update_history(self, user_input: str, response: str, response_kwargs: dict | None = None):
         """Maintain conversation history."""
         self.conversation_history.append(HumanMessage(content=user_input))
         if response:
             from langchain_core.messages import AIMessage
 
-            self.conversation_history.append(AIMessage(content=response))
+            self.conversation_history.append(AIMessage(content=response, additional_kwargs=response_kwargs or {}))
+
         # Keep history bounded
         if len(self.conversation_history) > 20:
             self.conversation_history = self.conversation_history[-20:]

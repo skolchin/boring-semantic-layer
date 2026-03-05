@@ -138,11 +138,13 @@ class BSLTools:
         profile: str | None = None,
         profile_file: Path | str | None = None,
         chart_backend: str = "plotext",
+        return_json: bool = False,
     ):
         self.model_path = model_path
         self.profile = profile
         self.profile_file = profile_file
         self.chart_backend = chart_backend
+        self.return_json = return_json
         self._error_callback: Callable[[str], None] | None = None
         self.models = from_yaml(
             str(model_path),
@@ -294,9 +296,6 @@ class BSLTools:
                 raise result.failure()
             query_result = result.unwrap() if isinstance(result, Success) else result
 
-            if not chart_backend or chart_backend == 'auto': chart_backend = self.chart_backend
-            if not chart_format or chart_format == 'auto': chart_format = 'json'
-
             return generate_chart_with_data(
                 query_result,
                 get_records=get_records,
@@ -307,7 +306,7 @@ class BSLTools:
                 chart_format=chart_format,
                 chart_spec=chart_spec,
                 default_backend=self.chart_backend or "altair",
-                return_json=True,  # CLI mode: show table in terminal
+                return_json=self.return_json,
                 error_callback=self._error_callback,
             )
         except Exception as e:
