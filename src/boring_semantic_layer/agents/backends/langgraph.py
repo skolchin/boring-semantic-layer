@@ -210,7 +210,7 @@ class LangGraphBackend(BSLTools):
                         on_tool_result(tool_call_id, status, error_msg, content)
 
         # Update conversation history
-        self._update_history(user_input, final_response, final_kwargs)
+        self._update_history(user_input, final_response)
         self._error_callback = None
 
         tool_output = "\n\n".join(all_tool_outputs) if all_tool_outputs else ""

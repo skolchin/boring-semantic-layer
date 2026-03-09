@@ -262,5 +262,6 @@ class MCPSemanticModel(FastMCP):
 def create_mcp_server(
     models: Mapping[str, Any],
     name: str = "Semantic Layer MCP Server",
+    **kwargs,
 ) -> MCPSemanticModel:
-    return MCPSemanticModel(models=models, name=name)
+    return MCPSemanticModel(models=models, name=name, **kwargs)
