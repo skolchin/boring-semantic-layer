@@ -41,18 +41,67 @@ from .ops import (
 )
 from .query import query as build_query
 
+_JOIN_REMOVED_MESSAGE = (
+    "The join() method has been removed. Use join_one(), join_many(), or join_cross() instead.\n\n"
+    "For one-to-one relationships:\n"
+    "  table.join_one(other, lambda l, r: l.id == r.id)\n\n"
+    "For one-to-many relationships:\n"
+    "  table.join_many(other, lambda l, r: l.id == r.id)\n\n"
+    "For Cartesian product:\n"
+    "  table.join_cross(other)"
+)
+
 _BLOCKED_IBIS_METHODS = [
-    'alias', 'anti_join', 'any_inner_join', 'any_left_join',
-    'as_scalar', 'asof_join', 'bind', 'cache', 'cast',
-    'count', 'cross_join', 'describe', 'difference', 'distinct',
-    'drop', 'drop_null', 'dropna', 'equals', 'fill_null', 'fillna',
-    'get_backend', 'head', 'info', 'inner_join', 'intersect',
-    'left_join', 'nunique', 'outer_join', 'pivot_longer', 'pivot_wider',
-    'preview', 'projection', 'relocate', 'rename', 'right_join',
-    'rowid', 'sample', 'semi_join',
-    'to_array', 'to_delta', 'to_torch',
-    'topk', 'try_cast', 'unbind', 'union', 'unpack', 'value_counts',
-    'view', 'visualize', 'window_by',
+    "alias",
+    "anti_join",
+    "any_inner_join",
+    "any_left_join",
+    "as_scalar",
+    "asof_join",
+    "bind",
+    "cache",
+    "cast",
+    "count",
+    "cross_join",
+    "describe",
+    "difference",
+    "distinct",
+    "drop",
+    "drop_null",
+    "dropna",
+    "equals",
+    "fill_null",
+    "fillna",
+    "get_backend",
+    "head",
+    "info",
+    "inner_join",
+    "intersect",
+    "left_join",
+    "nunique",
+    "outer_join",
+    "pivot_longer",
+    "pivot_wider",
+    "preview",
+    "projection",
+    "relocate",
+    "rename",
+    "right_join",
+    "rowid",
+    "sample",
+    "semi_join",
+    "to_array",
+    "to_delta",
+    "to_torch",
+    "topk",
+    "try_cast",
+    "unbind",
+    "union",
+    "unpack",
+    "value_counts",
+    "view",
+    "visualize",
+    "window_by",
 ]
 
 
@@ -68,7 +117,7 @@ def to_untagged(expr):
 
 
 def to_tagged(expr, aggregate_cache_storage=None):
-    from .xorq_convert import to_tagged as _to_tagged
+    from .serialization import to_tagged as _to_tagged
 
     return _to_tagged(expr, aggregate_cache_storage=aggregate_cache_storage)
 
@@ -200,19 +249,25 @@ class SemanticTable(ir.Table):
         return self.op().to_untagged()
 
     def to_tagged(self, aggregate_cache_storage=None):
-        from .xorq_convert import to_tagged
+        from .serialization import to_tagged
 
         return to_tagged(self, aggregate_cache_storage=aggregate_cache_storage)
 
     def execute(self, **kwargs):
         # Accept kwargs for ibis compatibility (params, limit, etc)
-        return to_untagged(self).execute(**kwargs)
+        from .ops import _unify_backends
+
+        return _unify_backends(to_untagged(self)).execute(**kwargs)
 
     def compile(self, **kwargs):
-        return to_untagged(self).compile(**kwargs)
+        from .ops import _unify_backends
+
+        return _unify_backends(to_untagged(self)).compile(**kwargs)
 
     def sql(self, **kwargs):
-        return ibis.to_sql(to_untagged(self), **kwargs)
+        from .ops import _unify_backends
+
+        return ibis.to_sql(_unify_backends(to_untagged(self)), **kwargs)
 
     def to_pandas(self, **kwargs):
         return self.to_untagged().to_pandas(**kwargs)
@@ -254,6 +309,7 @@ def _make_blocked_method(name):
             f"'{type(self).__name__}' does not support '{name}()'. "
             f"Call .to_untagged().{name}() to use ibis operations directly."
         )
+
     method.__name__ = name
     method.__qualname__ = f"SemanticTable.{name}"
     return method
@@ -445,7 +501,7 @@ class SemanticModel(SemanticTable):
         self,
         other: SemanticModel,
         on: Callable[[Any, Any], ir.BooleanValue] | str | Deferred | Sequence[str | Deferred],
-        how: str = "inner",
+        how: str = "left",
     ) -> SemanticJoin:
         """Join with one-to-one relationship semantics.
 
@@ -454,7 +510,7 @@ class SemanticModel(SemanticTable):
             on: Join predicate. Accepts a lambda ``(left, right) -> bool``, a column
                 name string, a Deferred ``_.col``, or a list of strings/Deferred for
                 compound equi-joins.
-            how: Join type - "inner", "left", "right", or "outer" (default: "inner")
+            how: Join type - "left", "inner", "right", or "outer" (default: "left")
 
         Returns:
             SemanticJoin: The joined semantic model
@@ -506,13 +562,15 @@ class SemanticModel(SemanticTable):
             >>> table_a.join_cross(table_b)  # Cartesian product of all rows
         """
         other_op = other.op() if isinstance(other, SemanticModel) else other
-        return SemanticJoin(left=self.op(), right=other_op, on=None, how="cross", cardinality="cross")
+        return SemanticJoin(
+            left=self.op(), right=other_op, on=None, how="cross", cardinality="cross"
+        )
 
     def join(self, *args, **kwargs):
         """Deprecated: Use join_one() or join_many() instead.
 
         The generic join() method has been removed. Please use:
-        - join_one(other, lambda l, r: condition, how="inner") for one-to-one relationships
+        - join_one(other, lambda l, r: condition) for one-to-one relationships
         - join_many(other, lambda l, r: condition, how="left") for one-to-many relationships
         - join_cross(other) for Cartesian product
 
@@ -520,18 +578,10 @@ class SemanticModel(SemanticTable):
             Old: table.join(other, lambda l, r: l.id == r.id, how="left")
             New: table.join_many(other, lambda l, r: l.id == r.id)
 
-            Old: table.join(other, lambda l, r: l.id == r.id, how="inner")
+            Old: table.join(other, lambda l, r: l.id == r.id)
             New: table.join_one(other, lambda l, r: l.id == r.id)
         """
-        raise TypeError(
-            "The join() method has been removed. Use join_one(), join_many(), or join_cross() instead.\n\n"
-            "For one-to-one relationships:\n"
-            "  table.join_one(other, lambda l, r: l.id == r.id, how='inner')\n\n"
-            "For one-to-many relationships:\n"
-            "  table.join_many(other, lambda l, r: l.id == r.id, how='left')\n\n"
-            "For Cartesian product:\n"
-            "  table.join_cross(other)"
-        )
+        raise TypeError(_JOIN_REMOVED_MESSAGE)
 
     def index(
         self,
@@ -587,6 +637,7 @@ class SemanticModel(SemanticTable):
         limit: int | None = None,
         time_grain: str | None = None,
         time_range: dict[str, str] | None = None,
+        having: list | None = None,
     ):
         return build_query(
             semantic_table=self,
@@ -597,6 +648,7 @@ class SemanticModel(SemanticTable):
             limit=limit,
             time_grain=time_grain,
             time_range=time_range,
+            having=having,
         )
 
 
@@ -744,6 +796,7 @@ class SemanticJoin(SemanticTable):
         limit: int | None = None,
         time_grain: str | None = None,
         time_range: dict[str, str] | None = None,
+        having: list | None = None,
     ):
         return build_query(
             semantic_table=self,
@@ -754,6 +807,7 @@ class SemanticJoin(SemanticTable):
             limit=limit,
             time_grain=time_grain,
             time_range=time_range,
+            having=having,
         )
 
     def as_table(self) -> SemanticModel:
@@ -840,15 +894,7 @@ class SemanticJoin(SemanticTable):
 
     def join(self, *args, **kwargs):
         """Deprecated: Use join_one(), join_many(), or join_cross() instead."""
-        raise TypeError(
-            "The join() method has been removed. Use join_one(), join_many(), or join_cross() instead.\n\n"
-            "For one-to-one relationships:\n"
-            "  table.join_one(other, lambda l, r: l.id == r.id, how='inner')\n\n"
-            "For one-to-many relationships:\n"
-            "  table.join_many(other, lambda l, r: l.id == r.id, how='left')\n\n"
-            "For Cartesian product:\n"
-            "  table.join_cross(other)"
-        )
+        raise TypeError(_JOIN_REMOVED_MESSAGE)
 
     def group_by(self, *keys: str | Deferred):
         normalized = tuple(_normalize_to_name(k) for k in keys)
@@ -941,6 +987,50 @@ class SemanticFilter(SemanticTable):
             measures=new_base_meas,
             calc_measures=new_calc_meas,
         )
+
+    def join_one(
+        self,
+        other: SemanticModel,
+        on: Callable[[Any, Any], ir.BooleanValue] | str | Deferred | Sequence[str | Deferred],
+        how: str = "inner",
+    ) -> SemanticJoin:
+        """Join with one-to-one relationship semantics."""
+        return SemanticJoin(
+            left=self.op(),
+            right=other.op() if isinstance(other, SemanticModel) else other,
+            on=on,
+            how=how,
+            cardinality="one",
+        )
+
+    def join_many(
+        self,
+        other: SemanticModel,
+        on: Callable[[Any, Any], ir.BooleanValue] | str | Deferred | Sequence[str | Deferred],
+        how: str = "left",
+    ) -> SemanticJoin:
+        """Join with one-to-many relationship semantics."""
+        return SemanticJoin(
+            left=self.op(),
+            right=other.op() if isinstance(other, SemanticModel) else other,
+            on=on,
+            how=how,
+            cardinality="many",
+        )
+
+    def join_cross(self, other: SemanticModel) -> SemanticJoin:
+        """Cross join (Cartesian product) with another semantic model."""
+        return SemanticJoin(
+            left=self.op(),
+            right=other.op() if isinstance(other, SemanticModel) else other,
+            on=None,
+            how="cross",
+            cardinality="cross",
+        )
+
+    def join(self, *args, **kwargs):
+        """Deprecated: Use join_one(), join_many(), or join_cross() instead."""
+        raise TypeError(_JOIN_REMOVED_MESSAGE)
 
 
 class SemanticGroupBy(SemanticTable):
@@ -1164,15 +1254,7 @@ class SemanticAggregate(SemanticTable):
 
     def join(self, *args, **kwargs):
         """Deprecated: Use join_one(), join_many(), or join_cross() instead."""
-        raise TypeError(
-            "The join() method has been removed. Use join_one(), join_many(), or join_cross() instead.\n\n"
-            "For one-to-one relationships:\n"
-            "  table.join_one(other, lambda l, r: l.id == r.id, how='inner')\n\n"
-            "For one-to-many relationships:\n"
-            "  table.join_many(other, lambda l, r: l.id == r.id, how='left')\n\n"
-            "For Cartesian product:\n"
-            "  table.join_cross(other)"
-        )
+        raise TypeError(_JOIN_REMOVED_MESSAGE)
 
     def as_table(self) -> SemanticModel:
         return SemanticModel(

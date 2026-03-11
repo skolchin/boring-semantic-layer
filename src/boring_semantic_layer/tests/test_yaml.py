@@ -4,6 +4,7 @@ import os
 import tempfile
 
 import ibis
+import pandas as pd
 import pytest
 
 from boring_semantic_layer import SemanticTable, from_config, from_yaml
@@ -1262,3 +1263,110 @@ carriers:
 
     finally:
         os.unlink(yaml_path)
+
+
+def test_from_config_with_filter_and_joins():
+    """Regression test for #186: from_config crashes when a model has both
+    a filter and joins because SemanticFilter lacked join methods."""
+    con = ibis.duckdb.connect(":memory:")
+    orders = con.create_table(
+        "orders_186",
+        pd.DataFrame({"oid": [1, 2, 3], "cid": [1, 1, 2], "amount": [10, 20, 30]}),
+    )
+    customers = con.create_table(
+        "custs_186",
+        pd.DataFrame({"cid": [1, 2], "name": ["Alice", "Bob"]}),
+    )
+    config = {
+        "customers": {
+            "table": "custs_186",
+            "dimensions": {"name": {"expr": "_.name"}},
+        },
+        "orders": {
+            "table": "orders_186",
+            "dimensions": {"oid": {"expr": "_.oid"}},
+            "measures": {"total": {"expr": "_.amount.sum()"}},
+            "filter": "_.amount > 5",
+            "joins": {
+                "customers": {
+                    "model": "customers",
+                    "type": "one",
+                    "left_on": "cid",
+                    "right_on": "cid",
+                },
+            },
+        },
+    }
+    models = from_config(config, tables={"orders_186": orders, "custs_186": customers})
+    result = models["orders"].group_by("orders.oid").aggregate("orders.total").execute()
+    assert "orders.oid" in result.columns
+    assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# Issue #114: self-joins in YAML
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_self_joins(duckdb_conn):
+    """Test joining the same model multiple times with different aliases (#114)."""
+    from boring_semantic_layer import to_semantic_table
+
+    duckdb_conn.raw_sql(
+        "CREATE TABLE airports_114 (code VARCHAR, city VARCHAR)"
+    )
+    duckdb_conn.raw_sql(
+        "INSERT INTO airports_114 VALUES ('SFO', 'San Francisco'), "
+        "('JFK', 'New York'), ('LAX', 'Los Angeles')"
+    )
+    duckdb_conn.raw_sql(
+        "CREATE TABLE flights_114 (origin VARCHAR, destination VARCHAR, distance INTEGER)"
+    )
+    duckdb_conn.raw_sql(
+        "INSERT INTO flights_114 VALUES ('SFO', 'JFK', 2586), "
+        "('JFK', 'LAX', 2475), ('LAX', 'SFO', 337)"
+    )
+
+    airports_model = (
+        to_semantic_table(duckdb_conn.table("airports_114"), name="airports")
+        .with_dimensions(code=lambda t: t.code, city=lambda t: t.city)
+    )
+
+    config = {
+        "flights": {
+            "table": "flights_114",
+            "dimensions": {"origin": "_.origin", "destination": "_.destination"},
+            "measures": {"total_distance": "_.distance.sum()"},
+            "joins": {
+                "origin_airport": {
+                    "model": "airports",
+                    "type": "one",
+                    "left_on": "origin",
+                    "right_on": "code",
+                },
+                "destination_airport": {
+                    "model": "airports",
+                    "type": "one",
+                    "left_on": "destination",
+                    "right_on": "code",
+                },
+            },
+        },
+    }
+
+    models = from_config(
+        config,
+        tables={
+            "flights_114": duckdb_conn.table("flights_114"),
+            "airports": airports_model,
+        },
+    )
+    df = (
+        models["flights"]
+        .group_by("origin_airport.city", "destination_airport.city")
+        .aggregate("total_distance")
+        .execute()
+    )
+    assert len(df) == 3
+    assert "origin_airport.city" in df.columns
+    assert "destination_airport.city" in df.columns

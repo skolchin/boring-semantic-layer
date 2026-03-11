@@ -209,6 +209,11 @@ def _resolve_measure_name(
 ) -> Maybe[str]:
     if name in known_set:
         return Some(name)
+    # Suffix matching: resolve unprefixed name to prefixed equivalent
+    suffix = f".{name}"
+    matches = tuple(k for k in known if k.endswith(suffix))
+    if len(matches) == 1:
+        return Some(matches[0])
     return Maybe.from_optional(None)
 
 
@@ -284,7 +289,7 @@ class MeasureScope:
         return _resolve_column_item(self.tbl, name)
 
     def all(self, ref):
-        import ibis as ibis_mod
+        from xorq.vendor import ibis as ibis_mod
 
         if isinstance(ref, str):
             if self.post_agg:
@@ -338,7 +343,7 @@ class ColumnScope:
         return self.tbl[name]
 
     def all(self, ref):
-        import ibis as ibis_mod
+        from xorq.vendor import ibis as ibis_mod
 
         if isinstance(ref, str):
             return self.tbl[ref].sum().over(ibis_mod.window())

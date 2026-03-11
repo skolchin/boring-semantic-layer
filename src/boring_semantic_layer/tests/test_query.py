@@ -266,6 +266,95 @@ class TestMultiLayerDerivedFields:
         assert "total_flights" in sql_two
 
 
+class TestMultiLevelDimensionFilters:
+    """Test filtering on multi-level derived dimensions (#182)."""
+
+    @pytest.fixture()
+    def flights_st(self):
+        tbl = ibis.memtable({
+            "origin": ["NYC", "LAX", "NYC", "SFO", "LAX"],
+            "distance": [2789, 2789, 2902, 347, 347],
+            "duration": [330, 330, 360, 65, 65],
+        })
+        return (
+            to_semantic_table(tbl, name="flights")
+            .with_dimensions(
+                origin=lambda t: t.origin,
+                distance=lambda t: t.distance,
+                d_one=lambda t: t.distance.add(1),
+                d_two=lambda t: t.d_one.add(1),
+            )
+            .with_measures(
+                avg_duration=lambda t: t.duration.mean(),
+            )
+        )
+
+    def test_filter_lambda_on_second_level_derived(self, flights_st):
+        result = flights_st.filter(ibis._.d_two > 1000).execute()
+        assert len(result) > 0
+        assert all(result["d_two"] > 1000)
+
+    def test_query_dict_filter_on_second_level_derived(self, flights_st):
+        result = flights_st.query(
+            dimensions=["d_two"],
+            measures=["avg_duration"],
+            filters=[{"field": "d_two", "operator": ">", "value": 1000}],
+        ).execute()
+        assert len(result) > 0
+        assert all(result["d_two"] > 1000)
+
+    def test_query_deferred_filter_on_second_level_derived(self, flights_st):
+        result = flights_st.query(
+            dimensions=["d_two"],
+            filters=[ibis._.d_two > 1000],
+        ).execute()
+        assert len(result) > 0
+
+    def test_filter_on_first_level_derived_still_works(self, flights_st):
+        result = flights_st.filter(ibis._.d_one > 1000).execute()
+        assert len(result) > 0
+        assert all(result["d_one"] > 1000)
+
+    def test_chained_filters_on_derived_dims(self, flights_st):
+        """Stacked filter().filter() both referencing derived dimensions."""
+        result = (
+            flights_st
+            .filter(ibis._.d_one > 500)
+            .filter(ibis._.d_two > 1000)
+            .execute()
+        )
+        assert len(result) > 0
+        assert all(result["d_one"] > 500)
+        assert all(result["d_two"] > 1000)
+
+    def test_three_level_derived_dimension_filter(self):
+        """Arbitrary-depth chain: d_three -> d_two -> d_one -> distance."""
+        tbl = ibis.memtable({
+            "distance": [2789, 347, 2902],
+        })
+        st = (
+            to_semantic_table(tbl, name="test")
+            .with_dimensions(
+                d_one=lambda t: t.distance.add(1),
+                d_two=lambda t: t.d_one.add(1),
+                d_three=lambda t: t.d_two.add(1),
+            )
+        )
+        result = st.filter(ibis._.d_three > 1000).execute()
+        assert len(result) > 0
+        assert all(result["d_three"] > 1000)
+
+    def test_filter_derived_dim_not_in_query_dimensions(self, flights_st):
+        """Filter on a derived dim that is not in the requested dimensions."""
+        result = flights_st.query(
+            dimensions=["origin"],
+            measures=["avg_duration"],
+            filters=[ibis._.d_two > 1000],
+        ).execute()
+        assert len(result) > 0
+        assert "origin" in result.columns
+
+
 class TestFilters:
     """Test filter functionality."""
 
@@ -1352,6 +1441,254 @@ class TestDerivedTypeInference:
         )
         assert str(st.total_passengers.type()) == "int64"
         assert str(st.passengers_per_distance.type()) == "float64"
+
+
+class TestMeasureFilters:
+    """Test filtering by measures in query() (issue #177)."""
+
+    def test_filter_measure_greater_than(self, flights_data):
+        """Measure filter should apply as post-aggregation (HAVING)."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        result = st.query(
+            dimensions=["carrier"],
+            measures=["total_distance"],
+            filters=[{"field": "total_distance", "operator": ">", "value": 1500}],
+        ).execute()
+        assert all(result["total_distance"] > 1500)
+
+    def test_filter_measure_is_not_null(self, flights_data):
+        """'is not null' on a measure should not error."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_passengers=lambda t: t.passengers.sum())
+        )
+        result = st.query(
+            dimensions=["carrier"],
+            measures=["total_passengers"],
+            filters=[{"field": "total_passengers", "operator": "is not null"}],
+        ).execute()
+        assert len(result) > 0
+
+    def test_mixed_dimension_and_measure_filters(self, flights_data):
+        """Dimension filters apply pre-agg, measure filters apply post-agg."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        # Filter: carrier != 'DL' AND total_distance > 1000
+        result = st.query(
+            dimensions=["carrier"],
+            measures=["total_distance"],
+            filters=[
+                {"field": "carrier", "operator": "!=", "value": "DL"},
+                {"field": "total_distance", "operator": ">", "value": 1000},
+            ],
+        ).execute()
+        assert "DL" not in result["carrier"].values
+        assert all(result["total_distance"] > 1000)
+
+    def test_model_prefixed_measure_filter(self, flights_data):
+        """Model-prefixed measure names should be detected as measure filters."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        result = st.query(
+            dimensions=["flights.carrier"],
+            measures=["flights.total_distance"],
+            filters=[{"field": "flights.total_distance", "operator": ">", "value": 0}],
+        ).execute()
+        assert len(result) > 0
+        assert all(result["total_distance"] > 0)
+
+    def test_compound_measure_filter(self, flights_data):
+        """Compound AND filter on measures should work post-aggregation."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        result = st.query(
+            dimensions=["carrier"],
+            measures=["total_distance"],
+            filters=[{
+                "operator": "AND",
+                "conditions": [
+                    {"field": "total_distance", "operator": ">", "value": 1000},
+                    {"field": "total_distance", "operator": "<", "value": 5000},
+                ],
+            }],
+        ).execute()
+        assert all(result["total_distance"] > 1000)
+        assert all(result["total_distance"] < 5000)
+
+    def test_dimension_filter_still_pre_aggregation(self, flights_data):
+        """Dimension filters should still be applied before aggregation."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        # Filter only AA rows, then aggregate — should only count AA distances
+        all_result = st.query(
+            dimensions=["carrier"], measures=["total_distance"]
+        ).execute()
+        filtered_result = st.query(
+            dimensions=["carrier"],
+            measures=["total_distance"],
+            filters=[{"field": "carrier", "operator": "=", "value": "AA"}],
+        ).execute()
+        assert len(filtered_result) == 1
+        assert filtered_result["carrier"].iloc[0] == "AA"
+
+    def test_having_parameter_with_lambda(self, flights_data):
+        """Explicit having= for callable filters on measures."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        result = st.query(
+            dimensions=["carrier"],
+            measures=["total_distance"],
+            having=[lambda t: t.total_distance > 1500],
+        ).execute()
+        assert all(result["total_distance"] > 1500)
+
+    def test_mixed_compound_and_filter_is_split(self, flights_data):
+        """AND compound mixing dim + measure fields should split correctly."""
+        st = (
+            to_semantic_table(flights_data, "flights")
+            .with_dimensions(carrier=lambda t: t.carrier)
+            .with_measures(total_distance=lambda t: t.distance.sum())
+        )
+        result = st.query(
+            dimensions=["carrier"],
+            measures=["total_distance"],
+            filters=[{
+                "operator": "AND",
+                "conditions": [
+                    {"field": "carrier", "operator": "!=", "value": "DL"},
+                    {"field": "total_distance", "operator": ">", "value": 0},
+                ],
+            }],
+        ).execute()
+        assert "DL" not in result["carrier"].values
+        assert all(result["total_distance"] > 0)
+
+
+class TestMutateGroupByAggregateOnJoinMany:
+    """Regression tests for #187 — mutate → group_by → aggregate on a
+    join_many model must preserve the mutated group-by column."""
+
+    @pytest.fixture(scope="class")
+    def joined_model(self, con):
+        customers_df = pd.DataFrame(
+            {"cid": [1, 2], "name": ["Alice", "Bob"]}
+        )
+        accounts_df = pd.DataFrame(
+            {
+                "aid": [10, 11, 12, 13],
+                "cid": [1, 1, 2, 2],
+                "date": pd.to_datetime(
+                    ["2024-01-05", "2024-02-10", "2024-01-15", "2024-02-20"]
+                ),
+                "balance": [100, 200, 300, 400],
+            }
+        )
+        customers = con.create_table("customers_187", customers_df)
+        accounts = con.create_table("accounts_187", accounts_df)
+
+        cust_model = to_semantic_table(customers, "customers").with_dimensions(
+            cid=lambda t: t.cid,
+            name=lambda t: t.name,
+        )
+        acct_model = to_semantic_table(accounts, "accounts").with_dimensions(
+            aid=lambda t: t.aid,
+            cid=lambda t: t.cid,
+            date=lambda t: t.date,
+        ).with_measures(
+            total_balance=lambda t: t.balance.sum(),
+        )
+
+        return cust_model.join_many(
+            acct_model, on=lambda l, r: l.cid == r.cid
+        )
+
+    def test_mutate_groupby_aggregate_preserves_column(self, joined_model):
+        """Mutated column used as group-by key must appear in the result."""
+        result = (
+            joined_model
+            .mutate(period=ibis._["date"].truncate("M"))
+            .group_by("period")
+            .aggregate("accounts.total_balance")
+        )
+        df = result.execute()
+        assert "period" in df.columns, (
+            f"'period' missing from result columns: {list(df.columns)}"
+        )
+        assert len(df) == 2  # Jan and Feb
+
+    def test_mutate_groupby_aggregate_values_correct(self, joined_model):
+        """Values should be correctly aggregated per mutated group."""
+        result = (
+            joined_model
+            .mutate(period=ibis._["date"].truncate("M"))
+            .group_by("period")
+            .aggregate("accounts.total_balance")
+        )
+        df = result.execute().sort_values("period").reset_index(drop=True)
+        # Jan: 100 + 300 = 400, Feb: 200 + 400 = 600
+        assert df["accounts.total_balance"].tolist() == [400, 600]
+
+    def test_mutate_with_semantic_dim_groupby(self, joined_model):
+        """Mutated key + semantic dimension in group-by together."""
+        result = (
+            joined_model
+            .mutate(period=ibis._["date"].truncate("M"))
+            .group_by("period", "customers.name")
+            .aggregate("accounts.total_balance")
+        )
+        df = result.execute()
+        assert "period" in df.columns
+        assert "customers.name" in df.columns
+        assert len(df) == 4  # 2 months × 2 customers
+
+    def test_mutate_groupby_order_by(self, joined_model):
+        """order_by on a mutated group-by column should not raise."""
+        result = (
+            joined_model
+            .mutate(period=ibis._["date"].truncate("M"))
+            .group_by("period")
+            .aggregate("accounts.total_balance")
+            .order_by("period")
+        )
+        df = result.execute()
+        assert "period" in df.columns
+        assert list(df["period"]) == sorted(df["period"])
+
+    def test_multiple_mutated_groupby_keys(self, joined_model):
+        """Multiple mutated columns in group-by should all survive."""
+        result = (
+            joined_model
+            .mutate(
+                period=ibis._["date"].truncate("M"),
+                bal_bucket=ibis._["balance"] > 150,
+            )
+            .group_by("period", "bal_bucket")
+            .aggregate("accounts.total_balance")
+        )
+        df = result.execute()
+        assert "period" in df.columns
+        assert "bal_bucket" in df.columns
+        assert len(df) >= 2
 
 
 if __name__ == "__main__":

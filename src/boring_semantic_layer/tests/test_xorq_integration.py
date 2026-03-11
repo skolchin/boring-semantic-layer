@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from boring_semantic_layer import SemanticModel
-from boring_semantic_layer.xorq_convert import from_tagged, to_tagged, try_import_xorq
+from boring_semantic_layer.serialization import from_tagged, to_tagged, try_import_xorq
 
 # Check if xorq is available
 try:
@@ -141,7 +141,7 @@ class TestXorqIntegration:
 
         # Verify BSL metadata is present
         assert metadata["bsl_op_type"] == "SemanticTableOp"
-        assert metadata["bsl_version"] == "1.0"
+        assert metadata["bsl_version"] == "2.0"
 
         # Verify dimension metadata (now stored as nested tuples)
         dims_tuple = metadata["dimensions"]
