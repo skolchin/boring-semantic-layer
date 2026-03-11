@@ -20,4 +20,4 @@ Examples:
 - For daily data: time_grain="TIME_GRAIN_DAY"
 
 Then filter using the time_range parameter or regular date filters like:
-{"field": "date_column", "operator": ">=", "value": "2024-01-01"}
+{"field": "date_column", "operator": ">=", "value": "2024-01-01T00:00:00Z"}
